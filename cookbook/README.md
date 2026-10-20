@@ -78,6 +78,7 @@ and sizes its blind spot.
 | [`pumpfun/read/pumpfun_watch_curve_progress.py`](pumpfun/read/pumpfun_watch_curve_progress.py) | How close a coin is to graduating, polled over time |
 | [`pumpfun/read/pumpfun_derive_curve_addresses.py`](pumpfun/read/pumpfun_derive_curve_addresses.py) | Derive a coin's curve and curve ATA offline, under both token programs |
 | [`pumpfun/read/pumpfun_read_quote_mints.py`](pumpfun/read/pumpfun_read_quote_mints.py) | Every asset a coin may be priced in, `--stocks` for the tokenized equities |
+| [`pumpfun/read/pumpfun_check_token_dexra.py`](pumpfun/read/pumpfun_check_token_dexra.py) | A risk verdict on fresh coins before buying: creator history, first buyers, known snipers. Needs a [Dexra](https://dexra.dev) API key; exits 1 on `avoid` |
 
 ### Trade
 
