@@ -51,7 +51,7 @@ REFUSALS: Final[dict[int, str]] = {
     HTTPStatus.UNAUTHORIZED: "DEXRA_API_KEY is invalid or revoked",
     HTTPStatus.PAYMENT_REQUIRED: (
         "today's credits ran out, or the key's plan takes fewer mints "
-        "per call (see https://dexra.dev/pricing)"
+        "per call (see https://dexra.dev/#pricing)"
     ),
     HTTPStatus.TOO_MANY_REQUESTS: "rate limited; slow down or raise the plan's limit",
 }
