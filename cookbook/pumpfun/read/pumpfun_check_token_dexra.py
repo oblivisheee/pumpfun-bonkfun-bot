@@ -16,8 +16,9 @@ up to 5 mints a call within its daily credits; past them the call answers HTTP
 
 The creator's history is there from the first second. The first buyers are
 analyzed when you ask, so the answer on a coin seconds old can take a while; if
-it still says "first buyers are not analyzed yet", `--wait` asks again until
-they are or the time runs out.
+it still says "first buyers are not analyzed yet", or Dexra answers HTTP 503
+`pending` while the analysis runs, `--wait` asks again until they are or the
+time runs out.
 
 The exit status is 1 when any coin's verdict is listed under `--refuse`
 (default `avoid`) or a coin is not found, so a shell loop can gate a buy on it.
@@ -25,6 +26,8 @@ The exit status is 1 when any coin's verdict is listed under `--refuse`
 
 import argparse
 import asyncio
+import json
+import math
 import os
 import sys
 from http import HTTPStatus
@@ -39,6 +42,8 @@ DEFAULT_TIMEOUT: Final[float] = 30.0
 DEFAULT_WAIT: Final[float] = 0.0
 DEFAULT_REFUSE: Final[list[str]] = ["avoid"]
 POLL_INTERVAL: Final[float] = 3.0
+# Dexra's documented Retry-After for a pending analysis, used if the header is absent.
+DEFAULT_RETRY_AFTER: Final[float] = 60.0
 VERDICTS: Final[list[str]] = ["ok", "caution", "avoid", "unknown"]
 
 load_dotenv()
@@ -54,6 +59,9 @@ REFUSALS: Final[dict[int, str]] = {
         "per call (see https://dexra.dev/#pricing)"
     ),
     HTTPStatus.TOO_MANY_REQUESTS: "rate limited; slow down or raise the plan's limit",
+    HTTPStatus.SERVICE_UNAVAILABLE: (
+        "the analysis is still running; ask again later or pass a longer --wait"
+    ),
 }
 
 
@@ -64,6 +72,23 @@ class DexraError(Exception):
         super().__init__(REFUSALS.get(status, f"HTTP {status}: {body}"))
 
 
+class AnalysisPendingError(Exception):
+    """Dexra answered 503 `pending`: the analysis runs, ask again after a while."""
+
+    def __init__(self, retry_after: float) -> None:
+        super().__init__(f"analysis pending, retry after {retry_after:g}s")
+        self.retry_after = retry_after
+
+
+def retry_after(response: aiohttp.ClientResponse) -> float:
+    """Seconds from the Retry-After header, or Dexra's documented default."""
+    try:
+        seconds = float(response.headers.get("Retry-After", ""))
+    except ValueError:
+        return DEFAULT_RETRY_AFTER
+    return seconds if math.isfinite(seconds) and seconds >= 0 else DEFAULT_RETRY_AFTER
+
+
 async def check(
     session: aiohttp.ClientSession, endpoint: str, mints: list[str]
 ) -> list[dict[str, Any]]:
@@ -71,10 +96,19 @@ async def check(
     async with session.post(
         f"{endpoint}/new_launches/batch", json={"mints": mints}
     ) as response:
-        body = await response.json(content_type=None)
-        if response.status != HTTPStatus.OK:
-            raise DexraError(response.status, body)
-    return body["result"]["results"]
+        if response.status == HTTPStatus.OK:
+            body = await response.json(content_type=None)
+            return body["result"]["results"]
+        # Error bodies are not always JSON: a 402 carries its terms in a header.
+        text = await response.text()
+        try:
+            error = json.loads(text)
+        except ValueError:
+            error = text
+        pending = isinstance(error, dict) and error.get("error") == "pending"
+        if response.status == HTTPStatus.SERVICE_UNAVAILABLE and pending:
+            raise AnalysisPendingError(retry_after(response))
+        raise DexraError(response.status, error)
 
 
 def analysis_pending(result: dict[str, Any]) -> bool:
@@ -133,11 +167,27 @@ async def run(mints: list[str], endpoint: str, timeout: float, wait: float) -> l
     ) as session:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + wait
-        results = await check(session, endpoint, mints)
-        while any(map(analysis_pending, results)) and loop.time() < deadline:
-            await asyncio.sleep(min(POLL_INTERVAL, deadline - loop.time()))
-            results = await check(session, endpoint, mints)
-    return results
+        while True:
+            try:
+                results = await check(session, endpoint, mints)
+            except AnalysisPendingError as pending:
+                if loop.time() >= deadline:
+                    raise DexraError(HTTPStatus.SERVICE_UNAVAILABLE, pending) from None
+                delay = pending.retry_after
+            else:
+                if not any(map(analysis_pending, results)) or loop.time() >= deadline:
+                    return results
+                delay = POLL_INTERVAL
+            await asyncio.sleep(min(delay, deadline - loop.time()))
+
+
+def positive_seconds(value: str) -> float:
+    """Argparse type for a finite, positive number of seconds."""
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        message = f"must be a positive number, got {value}"
+        raise argparse.ArgumentTypeError(message)
+    return seconds
 
 
 def main() -> None:
@@ -161,7 +211,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--timeout",
-        type=float,
+        type=positive_seconds,
         default=DEFAULT_TIMEOUT,
         help="seconds one request may take (default: %(default)s)",
     )
