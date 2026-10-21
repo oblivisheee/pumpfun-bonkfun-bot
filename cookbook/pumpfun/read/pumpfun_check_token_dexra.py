@@ -18,7 +18,7 @@ The creator's history is there from the first second. The first buyers are
 analyzed when you ask, so the answer on a coin seconds old can take a while; if
 it still says "first buyers are not analyzed yet", or Dexra answers HTTP 503
 `pending` while the analysis runs, `--wait` asks again until they are or the
-time runs out.
+time runs out. Each re-check is a billed call; `--poll-interval` sets how often.
 
 The exit status is 1 when any coin's verdict is listed under `--refuse`
 (default `avoid`) or a coin is not found, so a shell loop can gate a buy on it.
@@ -41,7 +41,8 @@ DEFAULT_ENDPOINT: Final[str] = "https://api.dexra.dev"
 DEFAULT_TIMEOUT: Final[float] = 30.0
 DEFAULT_WAIT: Final[float] = 0.0
 DEFAULT_REFUSE: Final[list[str]] = ["avoid"]
-POLL_INTERVAL: Final[float] = 3.0
+# Each re-check is a billed call, so poll a pending analysis sparingly.
+DEFAULT_POLL_INTERVAL: Final[float] = 15.0
 # Dexra's documented Retry-After for a pending analysis, used if the header is absent.
 DEFAULT_RETRY_AFTER: Final[float] = 60.0
 VERDICTS: Final[list[str]] = ["ok", "caution", "avoid", "unknown"]
@@ -159,7 +160,9 @@ def report(result: dict[str, Any]) -> None:
             )
 
 
-async def run(mints: list[str], endpoint: str, timeout: float, wait: float) -> list:
+async def run(
+    mints: list[str], endpoint: str, timeout: float, wait: float, poll_interval: float
+) -> list:
     headers = {"Authorization": f"Bearer {API_KEY}"}
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     async with aiohttp.ClientSession(
@@ -177,7 +180,7 @@ async def run(mints: list[str], endpoint: str, timeout: float, wait: float) -> l
             else:
                 if not any(map(analysis_pending, results)) or loop.time() >= deadline:
                     return results
-                delay = POLL_INTERVAL
+                delay = poll_interval
             await asyncio.sleep(min(delay, deadline - loop.time()))
 
 
@@ -186,6 +189,15 @@ def positive_seconds(value: str) -> float:
     seconds = float(value)
     if not math.isfinite(seconds) or seconds <= 0:
         message = f"must be a positive number, got {value}"
+        raise argparse.ArgumentTypeError(message)
+    return seconds
+
+
+def nonnegative_seconds(value: str) -> float:
+    """Argparse type for a finite number of seconds, zero allowed."""
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds < 0:
+        message = f"must be zero or a positive number, got {value}"
         raise argparse.ArgumentTypeError(message)
     return seconds
 
@@ -204,9 +216,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--wait",
-        type=float,
+        type=nonnegative_seconds,
         default=DEFAULT_WAIT,
         help="seconds to keep asking while first buyers are not analyzed yet "
+        "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=positive_seconds,
+        default=DEFAULT_POLL_INTERVAL,
+        help="seconds between re-checks while waiting; each is a billed call "
         "(default: %(default)s)",
     )
     parser.add_argument(
@@ -226,7 +245,9 @@ def main() -> None:
         sys.exit("Set DEXRA_API_KEY in .env (create a key in the Dexra cabinet)")
 
     try:
-        results = asyncio.run(run(args.mints, args.endpoint, args.timeout, args.wait))
+        results = asyncio.run(
+            run(args.mints, args.endpoint, args.timeout, args.wait, args.poll_interval)
+        )
     except DexraError as error:
         sys.exit(f"Dexra: {error}")
     except (TimeoutError, aiohttp.ClientError) as error:
