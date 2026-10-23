@@ -170,20 +170,26 @@ async def run(
     ) as session:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + wait
-        # A re-check is a billed call: make one only if it starts before the deadline.
+        # A re-check is a billed call: make one only if it starts before the deadline,
+        # and check again after the sleep, which can overrun it.
         while True:
             try:
                 results = await check(session, endpoint, mints)
             except AnalysisPendingError as pending:
-                if loop.time() + pending.retry_after > deadline:
-                    raise DexraError(HTTPStatus.SERVICE_UNAVAILABLE, pending) from None
+                results, last_pending = None, pending
                 delay = pending.retry_after
             else:
-                done = not any(map(analysis_pending, results))
-                if done or loop.time() + poll_interval > deadline:
+                if not any(map(analysis_pending, results)):
                     return results
                 delay = poll_interval
+            if loop.time() + delay > deadline:
+                break
             await asyncio.sleep(delay)
+            if loop.time() > deadline:
+                break
+        if results is None:
+            raise DexraError(HTTPStatus.SERVICE_UNAVAILABLE, last_pending)
+        return results
 
 
 def positive_seconds(value: str) -> float:
